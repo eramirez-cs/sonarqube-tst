@@ -1,4 +1,5 @@
 node {
+  git 'https://github.com/eramirez-cs/sonarqube-tst'
   stage('SCM') {
     checkout scm
   }
@@ -7,46 +8,48 @@ node {
 
         def mvn = tool 'Maven 3.6.3';
         def coverage = '100'// replace with a Jenkins parameter or create a job to read from env
-        if (env.CHANGE_ID) {
+        echo "env.CHANGE_ID ${env.CHANGE_ID}"
+        if (env.BRANCH_NAME != 'master' && env.CHANGE_ID == null) {
 
             try {
                 // Checkout to develop and run mvn test
-                 sh "${mvn}/bin/mvn test"
-                 jacoco(
-                       execPattern: 'target/*.exec',
-                       classPattern: 'target/classes',
-                       sourcePattern: 'src/main/java',
-                       exclusionPattern: 'src/test*',
-                       minimumLineCoverage: coverage
-                 )
+                 sh "${mvn}/bin/mvn clean clover:setup test clover:aggregate clover:clover"
+                 step([
+                       $class: 'CloverPublisher',
+                       cloverReportDir: 'target/site',
+                       cloverReportFileName: 'clover.xml',
+                       healthyTarget: [methodCoverage: 70, conditionalCoverage: 80, statementCoverage: 80], // optional, default is: method=70, conditional=80, statement=80
+                       unhealthyTarget: [methodCoverage: 50, conditionalCoverage: 50, statementCoverage: 50], // optional, default is none
+                       failingTarget: [methodCoverage: 0, conditionalCoverage: 0, statementCoverage: 0]     // optional, default is none
+                     ])
 
-                 def jacocoReport = sh(
-                    script: "cat target/site/jacoco/index.html",
-                    returnStdout: true
-                 ).trim()
+                 // read our HTML report into a String
+                 String report = readFile ("target/site/clover/dashboard.html")
+                 // split each line break into its own String
+                 String[] lines = report.split("\n")
 
-                // Find a better way to do so, try to check XmlSlurper
-                echo jacocoReport
-                def index = jacocoReport.indexOf('<td class="ctr2">')
-                echo index.toString()
-                def lineCoverage = jacocoReport.substring(index + 17, index + 20)
+                 def foundPassedLine = lines.find{ line-> line =~ /div class="barPositive contribBarPositive "/ }
 
-                 // Getting information from html
-                 /*def ulDom = new XmlSlurper().parseText(jacocoReport)
-                 def elements = ulDom.table.findAll {
-                    echo it.localText()
-                 }*/
+                 // match for the numeric values
+                 def passedMatch = (foundPassedLine =~ /[0-9]+[.][0-9]+/)
+
+                 // cast to Integer so we can work with the number values
+                 def e2ePassed = passedMatch[0] as Float
+
+                 println ("Passed: ${e2ePassed}")
+
+                 echo "Current Pull Request ID: ${pullRequest.id}"
 
                  try {
                     pullRequest.review('APPROVE', "The execution, coverage and unit test failure verification passed successfully.")
                     pullRequest.addLabel('JenkinsReviewPassed')
                     pullRequest.removeLabel('JenkinsReviewFailed')
                  } catch(ex) {
-                    echo "Published"
+                    echo "Published ${ex}"
                  }
             } catch (all) {
-                def error = "${all}"
-                echo error
+                // def error = "${all}"
+                echo "Error ${all}"
                 if(error.contains("hudson.AbortException: script returned exit code 1")) {
                     echo "Exception detected: test errors"
                     pullRequest.review('REQUEST_CHANGES', 'The build had failed. Maybe some of your unit tests are failing up')
